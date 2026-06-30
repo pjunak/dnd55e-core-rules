@@ -34,6 +34,16 @@ function makeFake() {
         spellcasting: null, weaponMastery: { count: 3 }, acFormulas: [],
         startingProficiencies: { weapons: ['simple', 'martial'] },
       },
+      paladin: {
+        id: 'paladin', name: 'Paladin', kind: 'class', hitDie: 'd10', savingThrows: ['WIS', 'CHA'],
+        spellcasting: { ability: 'CHA', type: 'half', prepares: 'list' }, weaponMastery: { count: 2 }, acFormulas: [],
+        progression: [{ level: 1, preparedSpells: 2 }, { level: 5, preparedSpells: 6 }, { level: 10, preparedSpells: 8 }],
+      },
+      ranger: {
+        id: 'ranger', name: 'Ranger', kind: 'class', hitDie: 'd10', savingThrows: ['STR', 'DEX'],
+        spellcasting: { ability: 'WIS', type: 'half', prepares: 'list' }, weaponMastery: { count: 2 }, acFormulas: [],
+        progression: [{ level: 1, preparedSpells: 2 }, { level: 5, preparedSpells: 6 }, { level: 10, preparedSpells: 8 }],
+      },
     },
     weapon: {
       longsword: { id: 'longsword', name: 'Longsword', kind: 'weapon', category: 'martial', range: 'melee', damage: '1d8', damageType: 'slashing', properties: ['versatile'], versatileDamage: '1d10', mastery: 'Sap' },
@@ -54,6 +64,10 @@ function makeFake() {
     feat: {
       'fey-touched': { id: 'fey-touched', name: 'Fey Touched', grants: { abilityScoreIncrease: { choose: 1, amount: 1, from: ['INT', 'WIS', 'CHA'] }, spells: [{ ids: ['misty-step'], alwaysPrepared: true, free: '1/long' }] } },
       tough: { id: 'tough', name: 'Tough', grants: { hpPerLevel: 2 } },
+      'magic-initiate': { id: 'magic-initiate', name: 'Magic Initiate', grants: { spells: [
+        { id: 'mi-cantrips', choose: 2, spellLevel: 0, from: { class: ['wizard'] }, alwaysPrepared: true },
+        { id: 'mi-spell', choose: 1, spellLevel: 1, from: { class: ['wizard'] }, alwaysPrepared: true, free: '1/long' },
+      ] } },
     },
     spell: {
       bless: { id: 'bless', name: 'Bless', level: 1, school: 'Enchantment' },
@@ -107,7 +121,7 @@ test('core-rules: universal math is correct, with or without compendium', () => 
 
 test('core-rules: passes compendium data through + resolves the class record', () => {
   const { rec } = withFake();
-  assert.equal(rec.provided.listClasses().length, 3, 'passthrough listClasses');
+  assert.ok(rec.provided.listClasses().length >= 3, 'passthrough listClasses');
   const { sheet } = rec.provided.hydrate({ className: 'Wizard', level: 1 });
   assert.equal(sheet.class?.id, 'wizard', 'resolves class via compendium');
   assert.equal(sheet.derived.hitDie, 'd6', 'pulls hitDie from the class record');
@@ -246,6 +260,44 @@ test('core-rules: lineage spells are level-gated + provenance-tagged', () => {
   const l5 = rec.provided.hydrate({ className: 'Wizard', level: 5, race: 'Elf', lineage: 'drow' }).sheet.spellcasting.granted;
   assert.ok(l5.some((g) => g.ref === 'faerie-fire') && l5.some((g) => g.ref === 'darkness'), 'lineage spells unlock by level');
   assert.equal(l5.find((g) => g.ref === 'faerie-fire').source.type, 'species', 'tagged species provenance');
+});
+
+test('core-rules: a single-class half-caster uses its OWN slot table (2024 L1)', () => {
+  const { rec } = withFake();
+  const l1 = rec.provided.hydrate({ abilities: { CHA: 16 }, className: 'Paladin', level: 1 }).sheet;
+  assert.deepEqual(l1.spellcasting.slots, [2], 'L1 paladin: two 1st-level slots (ceil(1/2)=1), not [] from floor');
+  assert.equal(l1.spellcasting.perClass[0].preparedLimit, 2, 'and prepares 2');
+  const l5 = rec.provided.hydrate({ abilities: { CHA: 16 }, className: 'Paladin', level: 5 }).sheet;
+  assert.deepEqual(l5.spellcasting.slots, [4, 2], 'L5 paladin = 4× 1st, 2× 2nd');           // ceil(5/2)=3
+});
+
+test('core-rules: multiclassing two half-casters double-rounds (stingier than single)', () => {
+  const { rec } = withFake();
+  const mc = rec.provided.hydrate({ classes: [{ classId: 'paladin', level: 5 }, { classId: 'ranger', level: 5 }] }).sheet;
+  assert.deepEqual(mc.spellcasting.slots, [4, 3], 'Pal5/Ran5 → floor(5/2)+floor(5/2)=4 combined → [4,3]');  // MC-2
+  const solo = rec.provided.hydrate({ classes: [{ classId: 'paladin', level: 10 }] }).sheet;
+  assert.deepEqual(solo.spellcasting.slots, [4, 3, 2], 'but single Paladin 10 (ceil 5) keeps its own table');
+});
+
+test('core-rules: choose-grants resolve picks + expose pending choices (SP-10)', () => {
+  const { rec } = withFake();
+  // Magic Initiate (2 cantrips + 1 spell). No picks → 2 pending choices, nothing granted from it.
+  const empty = rec.provided.hydrate({ className: 'Wizard', level: 5, feats: [{ featId: 'magic-initiate' }] }).sheet;
+  const pc = empty.spellcasting.pendingChoices;
+  assert.equal(pc.length, 2, 'two choose-grants pending (cantrips + spell)');
+  const cantrips = pc.find((x) => x.spellLevel === 0);
+  assert.equal(cantrips.choose, 2, 'choose 2 cantrips');
+  assert.ok(cantrips.key.startsWith('feat:magic-initiate:'), 'key carries source + grant id');
+  assert.ok(!empty.spellcasting.granted.some((g) => g.source.id === 'magic-initiate'), 'nothing granted until picked');
+  // With picks → granted; over-picking is capped to `choose`.
+  const picked = rec.provided.hydrate({
+    className: 'Wizard', level: 5, feats: [{ featId: 'magic-initiate' }],
+    grantChoices: { [cantrips.key]: ['dancing-lights', 'druidcraft', 'faerie-fire'] },
+  }).sheet;
+  const got = picked.spellcasting.granted.filter((x) => x.source.id === 'magic-initiate');
+  assert.equal(got.length, 2, 'capped to the choose count (3 picks → 2 granted)');
+  assert.deepEqual(got.map((x) => x.ref), ['dancing-lights', 'druidcraft'], 'first picks granted, provenance feat');
+  assert.equal(picked.spellcasting.pendingChoices.find((x) => x.key === cantrips.key).picked.length, 2, 'picks reflected (capped)');
 });
 
 test('core-rules: a feat with hpPerLevel (Tough) raises max HP', () => {

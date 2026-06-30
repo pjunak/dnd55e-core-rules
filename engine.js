@@ -350,14 +350,14 @@ export function hydrate(decisions, api) {
   // plus the combined multiclass slot pool.
   step(() => {
     const per = [];
-    let combinedCasterLevel = 0;
+    const casters = [];
     for (const c of classes) {
       const sc = c.record && c.record.spellcasting;
       // a third-caster subclass (e.g. Eldritch Knight) carries spellcasting on the SUBCLASS
       const subRec = c.subclass && api && api.getItem ? api.getItem('subclass', c.subclass) : null;
       const eff = sc || (subRec && subRec.spellcasting) || null;
       if (!eff) continue;
-      combinedCasterLevel += casterContribution(eff.type, c.level);
+      casters.push({ type: eff.type, level: c.level });
       const ability = eff.ability;
       const mod = num(mods[ability]);
       const prog = progressionAt((subRec && subRec.progression) || (c.record && c.record.progression), c.level);
@@ -369,11 +369,28 @@ export function hydrate(decisions, api) {
       });
     }
 
+    // Slot pool (MC-2/MC-3): a SINGLE caster class uses its OWN class table —
+    // multiclassSlots indexed by its level rounded UP per caster fraction, so a
+    // 2024 L1 half-caster (Paladin/Ranger gain Spellcasting at L1) actually has
+    // slots, and odd levels aren't undercounted. MULTIple caster classes use the
+    // round-DOWN combined-level rule (multiclassing is intentionally stingier).
+    // Full casters: ceil(level/1) == level, so this is a no-op for them.
+    const slotDivisor = (t) => (t === 'full' ? 1 : t === 'half' ? 2 : t === 'third' ? 3 : 0);
+    let combinedCasterLevel;
+    if (casters.length === 1) {
+      const d = slotDivisor(casters[0].type);
+      combinedCasterLevel = d ? Math.ceil(casters[0].level / d) : 0;
+    } else {
+      combinedCasterLevel = casters.reduce((s, c) => s + casterContribution(c.type, c.level), 0);
+    }
+
     // Granted spells (SP-1/SP-2/SP-12): subclass always-prepared + feat grants +
     // species lineage. Each is provenance-tagged so the sheet can separate them
     // from the player's own picks and flag forced duplicates (SP-3). Names are
     // resolved from the compendium (falls back to the ref when names-only).
     const granted = [];
+    const pendingChoices = [];
+    const grantChoices = (cd && cd.grantChoices) || {};
     const addGrant = (ref, source, opts) => {
       if (!ref) return;
       const rec = api && api.getItem ? api.getItem('spell', ref) : null;
@@ -382,21 +399,34 @@ export function hydrate(decisions, api) {
         source, alwaysPrepared: !!(opts && opts.alwaysPrepared), free: (opts && opts.free) || null,
       });
     };
+    // One grant entry: either FIXED (`ids`) or a CHOICE (`choose` + `from`). A
+    // choice resolves the player's picks from cd.grantChoices[key] and exposes
+    // the (possibly under-filled) choice on the sheet so the UI can render a
+    // filtered picker (SP-10/SP-20 — Magic Initiate, Fey Touched's choose-1,
+    // High Elf's wizard cantrip). `unlocked` gates by the source's level.
+    const addGrantEntry = (sp, source, unlocked) => {
+      if (!unlocked) return;
+      if (Array.isArray(sp.ids) && sp.ids.length) {
+        for (const ref of sp.ids) addGrant(ref, source, { alwaysPrepared: sp.alwaysPrepared, free: sp.free });
+      } else if (num(sp.choose) > 0 && sp.id) {
+        const key = source.type + ':' + source.id + ':' + sp.id;
+        const picked = Array.isArray(grantChoices[key]) ? grantChoices[key].slice(0, num(sp.choose)) : [];
+        for (const ref of picked) addGrant(ref, source, { alwaysPrepared: sp.alwaysPrepared, free: sp.free });
+        pendingChoices.push({ key, source, choose: num(sp.choose), spellLevel: num(sp.spellLevel), from: sp.from || {}, alwaysPrepared: !!sp.alwaysPrepared, picked: picked.slice() });
+      }
+    };
+    const unlockLevel = (sp) => num(sp.atLevel != null ? sp.atLevel : sp.level);
     for (const c of classes) {
       const subRec = c.subclass && api && api.getItem ? api.getItem('subclass', c.subclass) : null;
-      for (const sp of (subRec && subRec.spells) || []) {
-        if (num(sp.level) <= c.level) for (const ref of sp.ids || []) addGrant(ref, { type: 'subclass', id: c.subclass }, { alwaysPrepared: sp.alwaysPrepared });
-      }
+      for (const sp of (subRec && subRec.spells) || []) addGrantEntry(sp, { type: 'subclass', id: c.subclass }, unlockLevel(sp) <= c.level);
     }
     for (const f of Array.isArray(cd.feats) ? cd.feats : []) {
       const fid = f && (f.featId || f.id || f);
       const frec = fid && api && api.getItem ? api.getItem('feat', fid) : null;
-      for (const sp of (frec && frec.grants && frec.grants.spells) || []) {
-        for (const ref of sp.ids || []) addGrant(ref, { type: 'feat', id: fid }, { alwaysPrepared: sp.alwaysPrepared, free: sp.free });
-      }
+      for (const sp of (frec && frec.grants && frec.grants.spells) || []) addGrantEntry(sp, { type: 'feat', id: fid }, true);
     }
     if (lineage && lineage.grants && lineage.grants.spells) {
-      for (const sp of lineage.grants.spells) if (num(sp.level) <= totalLevel) for (const ref of sp.ids || []) addGrant(ref, { type: 'species', id: species.id }, { alwaysPrepared: sp.alwaysPrepared, free: sp.free });
+      for (const sp of lineage.grants.spells) addGrantEntry(sp, { type: 'species', id: species.id }, unlockLevel(sp) <= totalLevel);
     }
 
     sheet.spellcasting = {
@@ -404,6 +434,7 @@ export function hydrate(decisions, api) {
       casterLevel: combinedCasterLevel,
       slots: multiclassSlots(combinedCasterLevel),
       granted,
+      pendingChoices,
     };
   });
 
