@@ -16,6 +16,9 @@
 
 export const ABILITIES = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'];
 
+// EQ-3: a character can attune to at most 3 magic items at once (2024 PHB).
+const ATTUNE_LIMIT = 3;
+
 // Skill → governing ability. SYSTEM knowledge (not content), so it lives here
 // and the engine never needs the compendium just to total a skill.
 export const SKILL_ABILITY = {
@@ -87,16 +90,21 @@ export function resolveClasses(cd, api, warn) {
 
 // ── derived computations (each pure, given resolved inputs) ─────────
 
-/** HP-1/HP-2: first character level = max hit die of the FIRST class; every
- *  other level = average (round up) of that level's class die; + CON×totalLevel
- *  + per-level species bonuses (e.g. Dwarven Toughness, HP-3). */
+/** HP-1: the character's first level gets the MAX of its hit die; every other
+ *  level = average (round up) of that level's class die; + CON×totalLevel +
+ *  per-level species bonuses (e.g. Dwarven Toughness, HP-3). The max die is
+ *  awarded to the first level iterated — for the common single-class case that is
+ *  simply the class's die; multiclass entry order beyond the first doesn't change
+ *  the total, so no "origin class" is tracked. */
 export function computeMaxHp(classes, conMod, hpPerLevel) {
-  let hp = 0, charLevel = 0;
+  let hp = 0, charLevel = 0, maxDieAwarded = false;
   for (const c of classes) {
     const die = dieSize(c.record && c.record.hitDie);
     for (let i = 0; i < c.level; i++) {
       charLevel++;
-      hp += charLevel === 1 ? die : Math.floor(die / 2) + 1;
+      // Max hit die for the very first character level; average thereafter.
+      if (!maxDieAwarded) { hp += die; maxDieAwarded = true; }
+      else hp += Math.floor(die / 2) + 1;
     }
   }
   if (!charLevel) return 0;
@@ -133,8 +141,11 @@ export function computeArmorClass(cd, mods, classes, api) {
         candidates.push({ id: f.id, label: f.id, value: num(f.base, 10) + add });
       }
     }
-    candidates.push({ id: 'unarmored', label: 'Unarmored', value: 10 + dex });
   }
+  // ALWAYS offer the unarmored 10+DEX candidate so the reducer floors there: a
+  // malformed body-armor record (e.g. a negative/garbage baseAC) can never drop
+  // AC below the bare-minimum 10+DEX every creature has.
+  candidates.push({ id: 'unarmored', label: 'Unarmored', value: 10 + dex });
   const best = candidates.reduce((a, b) => (b.value > a.value ? b : a), { value: -Infinity, label: '', id: '' });
   const shieldBonus = shield ? num(shield.acBonus, 2) : 0;
   return { value: best.value + shieldBonus, base: best.label, shield: shieldBonus, candidates };
@@ -357,10 +368,12 @@ export function hydrate(decisions, api) {
       const subRec = c.subclass && api && api.getItem ? api.getItem('subclass', c.subclass) : null;
       const eff = sc || (subRec && subRec.spellcasting) || null;
       if (!eff) continue;
-      casters.push({ type: eff.type, level: c.level });
       const ability = eff.ability;
       const mod = num(mods[ability]);
       const prog = progressionAt((subRec && subRec.progression) || (c.record && c.record.progression), c.level);
+      // Stash the resolved progression row on the caster so the single-class slot
+      // path can read its authoritative per-level `spellSlots` directly.
+      casters.push({ type: eff.type, level: c.level, prog });
       per.push({
         classId: c.classId, ability, type: eff.type, prepares: eff.prepares || 'list', ritual: !!eff.ritual,
         saveDC: 8 + pb + mod, spellAttack: pb + mod,
@@ -369,20 +382,32 @@ export function hydrate(decisions, api) {
       });
     }
 
-    // Slot pool (MC-2/MC-3): a SINGLE caster class uses its OWN class table —
-    // multiclassSlots indexed by its level rounded UP per caster fraction, so a
-    // 2024 L1 half-caster (Paladin/Ranger gain Spellcasting at L1) actually has
-    // slots, and odd levels aren't undercounted. MULTIple caster classes use the
-    // round-DOWN combined-level rule (multiclassing is intentionally stingier).
-    // Full casters: ceil(level/1) == level, so this is a no-op for them.
+    // Slot pool (MC-2/MC-3). Two distinct rules:
+    //  • SINGLE caster class → use the class's OWN printed per-level slot
+    //    progression (`prog.spellSlots`) verbatim when the content provides it.
+    //    The combined-caster-level heuristic diverges from the printed
+    //    single-class table at high levels (e.g. Paladin L19 real = [4,3,3,1] but
+    //    the heuristic gives [4,3,3,3,2]), so the authoritative table wins. When
+    //    the (abbreviated/seed) content lacks `spellSlots`, fall back to the
+    //    caster-level heuristic: ceil(level / fraction) rounded UP, so a 2024 L1
+    //    half-caster (Paladin/Ranger gain Spellcasting at L1) still has slots and
+    //    odd levels aren't undercounted. (Full casters: ceil(level/1) == level.)
+    //  • MULTIPLE caster classes → the round-DOWN combined-caster-level rule
+    //    (multiclassing is intentionally stingier) indexed into MULTICLASS_SLOTS.
     const slotDivisor = (t) => (t === 'full' ? 1 : t === 'half' ? 2 : t === 'third' ? 3 : 0);
     let combinedCasterLevel;
+    let slots = null;        // set directly when the single class table is used
     if (casters.length === 1) {
-      const d = slotDivisor(casters[0].type);
-      combinedCasterLevel = d ? Math.ceil(casters[0].level / d) : 0;
+      const only = casters[0];
+      const ownSlots = only.prog && Array.isArray(only.prog.spellSlots) ? only.prog.spellSlots : null;
+      const d = slotDivisor(only.type);
+      // casterLevel reported for the UI/derive: the class's effective caster level.
+      combinedCasterLevel = d ? Math.ceil(only.level / d) : 0;
+      if (ownSlots) slots = ownSlots.slice();
     } else {
       combinedCasterLevel = casters.reduce((s, c) => s + casterContribution(c.type, c.level), 0);
     }
+    if (!slots) slots = multiclassSlots(combinedCasterLevel);
 
     // Granted spells (SP-1/SP-2/SP-12): subclass always-prepared + feat grants +
     // species lineage. Each is provenance-tagged so the sheet can separate them
@@ -432,7 +457,7 @@ export function hydrate(decisions, api) {
     sheet.spellcasting = {
       perClass: per,
       casterLevel: combinedCasterLevel,
-      slots: multiclassSlots(combinedCasterLevel),
+      slots,
       granted,
       pendingChoices,
     };
@@ -464,8 +489,8 @@ export function hydrate(decisions, api) {
       if (rec) weapons.push(computeWeaponAttack(rec, mods, pb, profW, masterySet));
     }
     sheet.weapons = weapons;
-    sheet.attunement = { count: attuned, limit: 3, over: attuned > 3 };
-    if (attuned > 3) warn('Attuned to more than 3 magic items (limit 3)');
+    sheet.attunement = { count: attuned, limit: ATTUNE_LIMIT, over: attuned > ATTUNE_LIMIT };
+    if (attuned > ATTUNE_LIMIT) warn('Attuned to more than ' + ATTUNE_LIMIT + ' magic items (limit ' + ATTUNE_LIMIT + ')');
   });
 
   // Collected features (provenance-tagged) — feeds the Builder's level log.

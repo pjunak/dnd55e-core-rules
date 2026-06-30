@@ -19,9 +19,13 @@ function makeFake() {
         id: 'wizard', name: 'Wizard', kind: 'class', hitDie: 'd6', savingThrows: ['INT', 'WIS'],
         spellcasting: { ability: 'INT', type: 'full', prepares: 'spellbook', ritual: true },
         weaponMastery: { count: 2 }, acFormulas: [],
+        // Authoritative printed full-caster spell-slot progression (2024 PHB).
         progression: [
           { level: 1, cantripsKnown: 3, preparedSpells: 4, spellSlots: [2] },
           { level: 5, cantripsKnown: 4, preparedSpells: 9, spellSlots: [4, 3, 2] },
+          { level: 11, cantripsKnown: 5, preparedSpells: 15, spellSlots: [4, 3, 3, 2, 1, 1] },
+          { level: 17, cantripsKnown: 5, preparedSpells: 21, spellSlots: [4, 3, 3, 3, 2, 1, 1, 1, 1] },
+          { level: 19, cantripsKnown: 5, preparedSpells: 23, spellSlots: [4, 3, 3, 3, 3, 1, 1, 1, 1] },
         ],
       },
       barbarian: {
@@ -37,17 +41,35 @@ function makeFake() {
       paladin: {
         id: 'paladin', name: 'Paladin', kind: 'class', hitDie: 'd10', savingThrows: ['WIS', 'CHA'],
         spellcasting: { ability: 'CHA', type: 'half', prepares: 'list' }, weaponMastery: { count: 2 }, acFormulas: [],
-        progression: [{ level: 1, preparedSpells: 2 }, { level: 5, preparedSpells: 6 }, { level: 10, preparedSpells: 8 }],
+        // Authoritative printed half-caster spell-slot progression (2024 PHB).
+        progression: [
+          { level: 1, preparedSpells: 2, spellSlots: [2] },
+          { level: 5, preparedSpells: 6, spellSlots: [4, 2] },
+          { level: 10, preparedSpells: 8, spellSlots: [4, 3, 2] },
+          { level: 11, preparedSpells: 9, spellSlots: [4, 3, 3] },
+          { level: 17, preparedSpells: 14, spellSlots: [4, 3, 3, 1] },
+          { level: 19, preparedSpells: 15, spellSlots: [4, 3, 3, 1] },
+        ],
       },
+      // Ranger deliberately ships NO spellSlots → exercises the heuristic fallback.
       ranger: {
         id: 'ranger', name: 'Ranger', kind: 'class', hitDie: 'd10', savingThrows: ['STR', 'DEX'],
         spellcasting: { ability: 'WIS', type: 'half', prepares: 'list' }, weaponMastery: { count: 2 }, acFormulas: [],
         progression: [{ level: 1, preparedSpells: 2 }, { level: 5, preparedSpells: 6 }, { level: 10, preparedSpells: 8 }],
       },
+      // Rogue-ish class: the 2024 'martial-finesse-or-light' weapon subset (PR-5)
+      // — proficient with simple weapons + martial weapons that have Finesse or Light.
+      rogue: {
+        id: 'rogue', name: 'Rogue', kind: 'class', hitDie: 'd8', savingThrows: ['DEX', 'INT'],
+        spellcasting: null, weaponMastery: { count: 2 }, acFormulas: [],
+        startingProficiencies: { weapons: ['martial-finesse-or-light'] },
+      },
     },
     weapon: {
       longsword: { id: 'longsword', name: 'Longsword', kind: 'weapon', category: 'martial', range: 'melee', damage: '1d8', damageType: 'slashing', properties: ['versatile'], versatileDamage: '1d10', mastery: 'Sap' },
       dagger: { id: 'dagger', name: 'Dagger', kind: 'weapon', category: 'simple', range: 'melee', damage: '1d4', damageType: 'piercing', properties: ['finesse', 'light', 'thrown'], mastery: 'Nick' },
+      rapier: { id: 'rapier', name: 'Rapier', kind: 'weapon', category: 'martial', range: 'melee', damage: '1d8', damageType: 'piercing', properties: ['finesse'], mastery: 'Vex' },
+      greatsword: { id: 'greatsword', name: 'Greatsword', kind: 'weapon', category: 'martial', range: 'melee', damage: '2d6', damageType: 'slashing', properties: ['heavy', 'two-handed'], mastery: 'Graze' },
     },
     subclass: {
       'eldritch-knight': {
@@ -77,7 +99,12 @@ function makeFake() {
       darkness: { id: 'darkness', name: 'Darkness', level: 2, school: 'Evocation' },
       druidcraft: { id: 'druidcraft', name: 'Druidcraft', level: 0, school: 'Transmutation' },
     },
-    armor: { breastplate: { id: 'breastplate', name: 'Breastplate', kind: 'armor', armorType: 'medium', baseAC: 14, dexCap: 2, acBonus: 0 } },
+    armor: {
+      breastplate: { id: 'breastplate', name: 'Breastplate', kind: 'armor', armorType: 'medium', baseAC: 14, dexCap: 2, acBonus: 0 },
+      // A malformed body-armor record (garbage negative baseAC) — must never drag
+      // AC below the 10+DEX unarmored floor.
+      brokenplate: { id: 'brokenplate', name: 'Broken Plate', kind: 'armor', armorType: 'heavy', baseAC: -5, dexCap: 0, acBonus: 0 },
+    },
     species: {
       dwarf: { id: 'dwarf', name: 'Dwarf', kind: 'species', speeds: { walk: 30 }, senses: { darkvision: 120 }, resistances: ['poison'], grants: { hpPerLevel: 1 }, lineages: [{ id: 'hill-dwarf', name: 'Hill Dwarf', grants: { hpPerLevel: 1 } }] },
       elf: { id: 'elf', name: 'Elf', kind: 'species', speeds: { walk: 30 }, senses: { darkvision: 60 }, resistances: [], lineages: [
@@ -265,10 +292,37 @@ test('core-rules: lineage spells are level-gated + provenance-tagged', () => {
 test('core-rules: a single-class half-caster uses its OWN slot table (2024 L1)', () => {
   const { rec } = withFake();
   const l1 = rec.provided.hydrate({ abilities: { CHA: 16 }, className: 'Paladin', level: 1 }).sheet;
-  assert.deepEqual(l1.spellcasting.slots, [2], 'L1 paladin: two 1st-level slots (ceil(1/2)=1), not [] from floor');
+  assert.deepEqual(l1.spellcasting.slots, [2], 'L1 paladin: two 1st-level slots (own table), not [] from floor');
   assert.equal(l1.spellcasting.perClass[0].preparedLimit, 2, 'and prepares 2');
   const l5 = rec.provided.hydrate({ abilities: { CHA: 16 }, className: 'Paladin', level: 5 }).sheet;
-  assert.deepEqual(l5.spellcasting.slots, [4, 2], 'L5 paladin = 4× 1st, 2× 2nd');           // ceil(5/2)=3
+  assert.deepEqual(l5.spellcasting.slots, [4, 2], 'L5 paladin = 4× 1st, 2× 2nd');
+});
+
+test('core-rules: single-class half-caster reads printed slots at high levels (not the heuristic)', () => {
+  const { rec } = withFake();
+  // The combined-caster-level heuristic diverges from the printed Paladin table
+  // at high levels (it would give L19 = [4,3,3,3,2]); the class table wins.
+  const slots = (lvl) => rec.provided.hydrate({ abilities: { CHA: 16 }, className: 'Paladin', level: lvl }).sheet.spellcasting.slots;
+  assert.deepEqual(slots(11), [4, 3, 3], 'Paladin L11 printed slots');
+  assert.deepEqual(slots(17), [4, 3, 3, 1], 'Paladin L17 printed slots');
+  assert.deepEqual(slots(19), [4, 3, 3, 1], 'Paladin L19 printed slots (= L20), NOT the heuristic [4,3,3,3,2]');
+});
+
+test('core-rules: single-class full-caster reads printed slots at high levels', () => {
+  const { rec } = withFake();
+  const slots = (lvl) => rec.provided.hydrate({ abilities: { INT: 16 }, className: 'Wizard', level: lvl }).sheet.spellcasting.slots;
+  assert.deepEqual(slots(11), [4, 3, 3, 2, 1, 1], 'Wizard L11 printed slots');
+  assert.deepEqual(slots(17), [4, 3, 3, 3, 2, 1, 1, 1, 1], 'Wizard L17 printed slots');
+  assert.deepEqual(slots(19), [4, 3, 3, 3, 3, 1, 1, 1, 1], 'Wizard L19 printed slots');
+});
+
+test('core-rules: single-class caster falls back to the heuristic when content lacks spellSlots', () => {
+  const { rec } = withFake();
+  // Ranger ships no spellSlots in its progression → the engine must fall back to
+  // the ceil(level/2) caster-level heuristic rather than returning [].
+  const r5 = rec.provided.hydrate({ abilities: { WIS: 16 }, className: 'Ranger', level: 5 }).sheet;
+  assert.deepEqual(r5.spellcasting.slots, [4, 2], 'L5 ranger via heuristic (ceil(5/2)=3 → [4,2])');
+  assert.ok(r5.spellcasting.slots.length > 0, 'heuristic never yields empty slots for an odd-level half-caster');
 });
 
 test('core-rules: multiclassing two half-casters double-rounds (stingier than single)', () => {
@@ -276,7 +330,7 @@ test('core-rules: multiclassing two half-casters double-rounds (stingier than si
   const mc = rec.provided.hydrate({ classes: [{ classId: 'paladin', level: 5 }, { classId: 'ranger', level: 5 }] }).sheet;
   assert.deepEqual(mc.spellcasting.slots, [4, 3], 'Pal5/Ran5 → floor(5/2)+floor(5/2)=4 combined → [4,3]');  // MC-2
   const solo = rec.provided.hydrate({ classes: [{ classId: 'paladin', level: 10 }] }).sheet;
-  assert.deepEqual(solo.spellcasting.slots, [4, 3, 2], 'but single Paladin 10 (ceil 5) keeps its own table');
+  assert.deepEqual(solo.spellcasting.slots, [4, 3, 2], 'but single Paladin 10 keeps its own table');
 });
 
 test('core-rules: choose-grants resolve picks + expose pending choices (SP-10)', () => {
@@ -305,6 +359,93 @@ test('core-rules: a feat with hpPerLevel (Tough) raises max HP', () => {
   const base = rec.provided.hydrate({ abilities: { CON: 14 }, className: 'Wizard', level: 5 }).sheet.derived.maxHp;
   const tough = rec.provided.hydrate({ abilities: { CON: 14 }, className: 'Wizard', level: 5, feats: [{ featId: 'tough' }] }).sheet.derived.maxHp;
   assert.equal(tough - base, 10, 'Tough = +2/level × 5');
+});
+
+test('core-rules: first character level gets the max hit die; later levels average (HP-1)', () => {
+  const { rec } = withFake();
+  // Single-class Fighter L1 (d10), CON 10 → +0, no species: max d10 = 10.
+  const single = rec.provided.hydrate({
+    abilities: { CON: 10 }, classes: [{ classId: 'fighter', level: 1 }],
+  }).sheet.derived.maxHp;
+  assert.equal(single, 10, 'single-class L1 Fighter → max d10 = 10');
+
+  // Multiclass: the FIRST entry's level takes the max die; the rest average.
+  // Fighter first (max d10=10) + Wizard L1 (avg d6=4) = 14.
+  const fighterFirst = rec.provided.hydrate({
+    abilities: { CON: 10 }, classes: [{ classId: 'fighter', level: 1 }, { classId: 'wizard', level: 1 }],
+  }).sheet.derived.maxHp;
+  assert.equal(fighterFirst, 14, 'Fighter first (max d10=10) + Wizard (avg d6=4) = 14');
+
+  // Wizard first (max d6=6) + Fighter (avg d10=6) = 12 — the first entry takes the max die.
+  const wizardFirst = rec.provided.hydrate({
+    abilities: { CON: 10 }, classes: [{ classId: 'wizard', level: 1 }, { classId: 'fighter', level: 1 }],
+  }).sheet.derived.maxHp;
+  assert.equal(wizardFirst, 12, 'Wizard first (max d6=6) + Fighter (avg d10=6) = 12');
+});
+
+test('core-rules: AC never drops below the 10+DEX unarmored floor for a malformed armor record (AC-1)', () => {
+  const { rec } = withFake();
+  const abilities = { DEX: 14, CON: 10 };  // +2 DEX → floor 12
+  const bad = rec.provided.hydrate({
+    abilities, level: 1, className: 'Fighter',
+    inventory: [{ name: 'Broken Plate', location: 'equipped' }],
+  }).sheet;
+  assert.equal(bad.derived.armorClass, 12, 'garbage baseAC -5 is floored at unarmored 10+DEX(+2)');
+  assert.ok(bad.ac.candidates.some((c) => c.id === 'unarmored'), 'unarmored candidate always present');
+});
+
+test('core-rules: martial-finesse-or-light proficiency covers only finesse/light martials (PR-5)', () => {
+  const { rec } = withFake();
+  const { sheet } = rec.provided.hydrate({
+    abilities: { STR: 12, DEX: 16 }, className: 'Rogue', level: 1,
+    inventory: [
+      { id: 'w1', ref: 'rapier', location: 'equipped' },      // martial + finesse → proficient
+      { id: 'w2', ref: 'greatsword', location: 'equipped' },  // martial, heavy/two-handed → NOT proficient
+      { id: 'w3', ref: 'dagger', location: 'ready' },         // simple → proficient (subset grants simple)
+    ],
+  });
+  const rapier = sheet.weapons.find((w) => w.ref === 'rapier');
+  const greatsword = sheet.weapons.find((w) => w.ref === 'greatsword');
+  const dagger = sheet.weapons.find((w) => w.ref === 'dagger');
+  assert.equal(rapier.proficient, true, 'finesse martial is proficient');
+  assert.equal(greatsword.proficient, false, 'non-finesse/non-light martial is NOT proficient');
+  assert.equal(dagger.proficient, true, 'simple weapon proficient (subset includes simple)');
+  // Proficiency shows in the attack bonus: rapier uses DEX(+3) + PB(+2) = 5; the
+  // greatsword (STR +1, not proficient) is just +1.
+  assert.equal(rapier.attackBonus, 5, 'DEX +3 + PB +2');
+  assert.equal(greatsword.attackBonus, 1, 'STR +1, no PB (not proficient)');
+});
+
+test('core-rules: saveProf manually unions extra saving-throw proficiencies (PR-4)', () => {
+  const { rec } = withFake();
+  // Wizard saves are INT/WIS; a manual saveProf adds STR on top of the class set.
+  const { sheet } = rec.provided.hydrate({
+    abilities: { STR: 14, INT: 16 }, className: 'Wizard', level: 5, saveProf: { STR: true },
+  });
+  assert.equal(sheet.saves.STR.proficient, true, 'manual STR save proficiency unions in');
+  assert.equal(sheet.saves.STR.total, 5, 'STR +2 + PB 3 (now proficient)');
+  assert.equal(sheet.saves.INT.proficient, true, 'class INT save still proficient');
+  assert.equal(sheet.saves.DEX.proficient, false, 'untouched save stays non-proficient');
+});
+
+test('core-rules: expertise on a non-proficient skill is ignored (PR-2)', () => {
+  const { rec } = withFake();
+  const { sheet } = rec.provided.hydrate({
+    abilities: { DEX: 14 }, className: 'Wizard', level: 5,
+    skillExpertise: { acrobatics: true },   // acrobatics is NOT proficient
+  });
+  assert.equal(sheet.skills.acrobatics.proficient, false, 'not proficient');
+  assert.equal(sheet.skills.acrobatics.expertise, false, 'expertise ignored without proficiency');
+  assert.equal(sheet.proficiencies.skills.acrobatics, 'none', 'reported as none');
+  assert.equal(sheet.skills.acrobatics.total, 2, 'just the DEX mod, no PB doubling');
+});
+
+test('core-rules: progression lookup above the seed cap returns the highest row ≤ level', () => {
+  const { rec } = withFake();
+  // Ranger progression rows stop at L10; querying L15 must use the L10 row
+  // (preparedSpells 8), not return null / the L1 row.
+  const r15 = rec.provided.hydrate({ abilities: { WIS: 16 }, className: 'Ranger', level: 15 }).sheet;
+  assert.equal(r15.spellcasting.perClass[0].preparedLimit, 8, 'L15 ranger uses the L10 cap row (highest ≤ 15)');
 });
 
 test('core-rules: renderers survive the smoke pass', () => {

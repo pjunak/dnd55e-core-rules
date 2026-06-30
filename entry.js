@@ -50,11 +50,21 @@ export default function register(host) {
     getRecords:      (kind) => (data()?.getRecords?.(kind) || []),
     // computation
     hydrate,
+    // PERF (M2): each granular helper below (initiative/maxHp/armorClass) runs a
+    // FULL hydrate() per call, so a sheet reading several of them re-derives the
+    // whole pipeline N times. If this shows up in a profile, memoize on a stable
+    // (decisions, data()) reference — e.g. cache the last { cd, dataRef, result }
+    // and reuse it when both are identity-equal. Left un-memoized for now: the
+    // pipeline is cheap and correctness/clarity beats premature caching.
     derive: {
       abilityMod:       Engine.abilityMod,
       proficiencyBonus: Engine.proficiencyBonus,
       multiclassSlots:  Engine.multiclassSlots,
-      initiative:       (cd) => Engine.abilityMod(((cd && (cd.abilities || cd.baseStats)) || {}).DEX),
+      // Delegate to the full pipeline (like maxHp/armorClass) so initiative
+      // reflects ability grants (DEX bumps) + the Alert feat, and reads baseStats
+      // with the same precedence as hydrate (baseStats || abilities), not the
+      // reverse.
+      initiative:       (cd) => hydrate(cd).sheet.derived.initiative,
       maxHp:            (cd) => hydrate(cd).sheet.derived.maxHp,
       armorClass:       (cd) => hydrate(cd).sheet.derived.armorClass,
       saveDC:           (abilityScore, totalLevel) => 8 + Engine.proficiencyBonus(totalLevel) + Engine.abilityMod(abilityScore),
