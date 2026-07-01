@@ -168,6 +168,8 @@ test('core-rules: derives HP / AC / saves / slots / mastery from content', () =>
     abilities: { STR: 10, DEX: 14, CON: 14, INT: 16, WIS: 12, CHA: 8 }, level: 5, className: 'Wizard',
   });
   assert.equal(sheet.derived.maxHp, 32, 'd6: 6 + 4×4 + CON(+2)×5 = 32');     // HP-1/HP-2
+  assert.equal(sheet.hp.breakdown.dice, 22, 'HP breakdown: d6 max 6 + 4×4 avg = 22');
+  assert.equal(sheet.hp.breakdown.conTotal, 10, 'HP breakdown: CON +2 × 5 levels');
   assert.equal(sheet.derived.armorClass, 12, 'no armor, no UD → 10 + DEX(+2)'); // AC-1
   assert.equal(sheet.saves.INT.total, 6, 'INT +3 + PB 3 (proficient)');         // PR-4
   assert.equal(sheet.saves.STR.proficient, false, 'STR not a wizard save');

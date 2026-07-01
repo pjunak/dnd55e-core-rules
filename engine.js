@@ -300,8 +300,18 @@ export function hydrate(decisions, api) {
       const frec = fid && api && api.getItem ? api.getItem('feat', fid) : null;
       if (frec && frec.grants && frec.grants.hpPerLevel) featHp += num(frec.grants.hpPerLevel);
     }
-    const maxHp = computeMaxHp(classes, mods.CON || 0, hpPerLevel + featHp);
-    sheet.hp = { max: maxHp };
+    const conMod = mods.CON || 0;
+    const perLevelMisc = hpPerLevel + featHp;   // species + lineage + feats, per level
+    const maxHp = computeMaxHp(classes, conMod, perLevelMisc);
+    // Breakdown for the sheet's HP legend (mirrors computeMaxHp's HP-1 rule): the
+    // raw hit-dice subtotal (first level max die, others average), CON×level, and
+    // the per-level misc bonuses. dice + conTotal + miscTotal === maxHp.
+    let dice = 0, charLevel = 0, maxDieAwarded = false;
+    for (const c of classes) {
+      const die = dieSize(c.record && c.record.hitDie);
+      for (let i = 0; i < c.level; i++) { charLevel++; if (!maxDieAwarded) { dice += die; maxDieAwarded = true; } else dice += Math.floor(die / 2) + 1; }
+    }
+    sheet.hp = { max: maxHp, breakdown: { dice, conMod, conTotal: conMod * charLevel, miscPerLevel: perLevelMisc, miscTotal: perLevelMisc * charLevel, level: charLevel } };
     sheet.derived.maxHp = maxHp;
   });
 
