@@ -32,6 +32,13 @@ function makeFake() {
         id: 'barbarian', name: 'Barbarian', kind: 'class', hitDie: 'd12', savingThrows: ['STR', 'CON'],
         spellcasting: null, weaponMastery: { count: 2 },
         acFormulas: [{ id: 'ud', base: 10, addAbilities: ['DEX', 'CON'], requires: { noArmor: true } }],
+        // FE-2/FE-3 resources exercising all three max shapes: progression table,
+        // per-level multiple, ability modifier.
+        classResources: [
+          { key: 'rage', name: 'Rage', recharge: 'long', progression: [{ level: 1, max: 2 }, { level: 3, max: 3 }, { level: 6, max: 4 }] },
+          { key: 'pool', name: 'Pool', recharge: 'short', perLevel: 5 },
+          { key: 'insp', name: 'Insp', recharge: [{ on: 'short', amount: 1 }, { on: 'long', amount: 'full' }], abilityMod: 'CHA', min: 1 },
+        ],
       },
       fighter: {
         id: 'fighter', name: 'Fighter', kind: 'class', hitDie: 'd10', savingThrows: ['STR', 'CON'],
@@ -77,6 +84,7 @@ function makeFake() {
         spellcasting: { ability: 'INT', type: 'third', prepares: 'list' },
         features: [{ level: 3, id: 'war-bond', name: 'War Bond' }],
         progression: [{ level: 3, cantripsKnown: 2, preparedSpells: 3, spellSlots: [2] }],
+        classResources: [{ key: 'ek-pool', name: 'EK Pool', recharge: [{ on: 'short', amount: 'full' }], progression: [{ level: 3, max: 2 }, { level: 7, max: 3 }] }],
       },
       'life-domain': {
         id: 'life-domain', name: 'Life Domain', kind: 'subclass', classId: 'cleric',
@@ -446,6 +454,48 @@ test('core-rules: progression lookup above the seed cap returns the highest row 
   // (preparedSpells 8), not return null / the L1 row.
   const r15 = rec.provided.hydrate({ abilities: { WIS: 16 }, className: 'Ranger', level: 15 }).sheet;
   assert.equal(r15.spellcasting.perClass[0].preparedLimit, 8, 'L15 ranger uses the L10 cap row (highest ≤ 15)');
+});
+
+test('core-rules: emits pools + hit dice + slots + charges with structured recharge (FE-2/FE-3)', () => {
+  const { rec } = withFake();
+  const s1 = rec.provided.hydrate({ abilities: { CHA: 16 }, className: 'Barbarian', level: 1 }).sheet;
+  const R = (s, k) => (s.resources || []).find((r) => r.key === k);
+  // Pools — progression / per-level / ability-mod maxes; recharge normalized.
+  assert.equal(R(s1, 'rage').max, 2, 'L1 Rage max = 2 (progression)');
+  assert.equal(R(s1, 'rage').kind, 'pool');
+  assert.deepEqual(R(s1, 'rage').recharge, [{ on: 'long', amount: 'full' }], 'string recharge → full-on-long');
+  assert.deepEqual(R(s1, 'insp').recharge, [{ on: 'short', amount: 1 }, { on: 'long', amount: 'full' }], 'array recharge kept');
+  assert.equal(R(s1, 'pool').max, 5, 'per-level 5×1');
+  assert.equal(R(s1, 'insp').max, 3, 'abilityMod CHA 16 → +3');
+  // Hit dice — aggregated by die, half-level long-rest regain.
+  const hd = R(s1, 'hit-dice-d12');
+  assert.ok(hd && hd.kind === 'hitdice' && hd.max === 1 && hd.die === 'd12', 'L1: 1× d12 hit die');
+  assert.deepEqual(hd.recharge, [{ on: 'long', amount: 'halfLevel' }]);
+  const s6 = rec.provided.hydrate({ abilities: { CHA: 8 }, className: 'Barbarian', level: 6 }).sheet;
+  assert.equal(R(s6, 'rage').max, 4, 'L6 Rage = 4');
+  assert.equal(R(s6, 'hit-dice-d12').max, 6, 'L6 → 6 hit dice');
+  assert.equal(R(s6, 'insp').max, 1, 'CHA 8 (−1) floored to min 1');
+  // Spell slots — one resource per level, full on long rest; no class pools.
+  const wiz = rec.provided.hydrate({ abilities: { INT: 16 }, className: 'Wizard', level: 5 }).sheet;
+  const slot1 = R(wiz, 'slot-1');
+  assert.ok(slot1 && slot1.kind === 'slot' && slot1.max === 4, 'wizard L5 → 1st-level slots (4)');
+  assert.deepEqual(slot1.recharge, [{ on: 'long', amount: 'full' }]);
+  assert.ok(wiz.resources.some((r) => r.kind === 'hitdice'), 'wizard emits hit dice');
+  assert.ok(!wiz.resources.some((r) => r.kind === 'pool'), 'wizard has no class pools');
+  // Charge — a feat free-cast (Fey Touched: Misty Step, 1/long).
+  const ft = rec.provided.hydrate({ abilities: { INT: 14 }, className: 'Wizard', level: 5, feats: [{ featId: 'fey-touched' }] }).sheet;
+  const ch = (ft.resources || []).find((r) => r.kind === 'charge');
+  assert.ok(ch && ch.max === 1, 'feat free-cast → a charge (max 1)');
+  assert.deepEqual(ch.recharge, [{ on: 'long', amount: 'full' }], '1/long → full-on-long');
+});
+
+test('core-rules: subclass resources are emitted, resolved at the class level (FE-2)', () => {
+  const { rec } = withFake();
+  const s = rec.provided.hydrate({ classes: [{ classId: 'fighter', level: 7, subclass: 'eldritch-knight' }] }).sheet;
+  const r = (s.resources || []).find((x) => x.key === 'ek-pool');
+  assert.ok(r, 'subclass classResources are emitted alongside class ones');
+  assert.equal(r.max, 3, 'resolved at the class level (7 → progression row 7 → 3)');
+  assert.equal(r.source.type, 'subclass', 'tagged with subclass provenance');
 });
 
 test('core-rules: renderers survive the smoke pass', () => {

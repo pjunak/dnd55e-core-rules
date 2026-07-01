@@ -508,5 +508,86 @@ export function hydrate(decisions, api) {
     sheet.features = feats;
   });
 
+  // Resource pools with recharge (FE-2/FE-3) — the single tracker model the sheet
+  // renders and the Rest wizard resets. Emits FOUR kinds, each carrying a
+  // structured `recharge: [{ on:'short'|'long', amount:'full'|<int>|'halfLevel'|
+  // {abilityMod} }]` so the wizard knows WHAT resets on which rest and by HOW MUCH:
+  //   • pool    — class resources (Rage / Focus / Channel Divinity…), from
+  //               each class's `classResources` (max = progression table / per-level
+  //               multiple / ability modifier / fixed).
+  //   • hitdice — one per die size across the build (max = summed class levels).
+  //   • slot    — spell slots per level (from spellcasting.slots).
+  //   • charge  — free/limited casts granted by feats/species/subclass features
+  //               (from spellcasting.granted[].free, e.g. Fey Touched's 1/long).
+  step(() => {
+    const abilMod = (a) => (sheet.abilities && sheet.abilities[a] ? num(sheet.abilities[a].mod, 0) : 0);
+    const resolveMax = (res, lvl) => {
+      if (Array.isArray(res.progression) && res.progression.length) {
+        let m = 0;
+        for (const row of res.progression) if (num(row.level, 1) <= lvl) m = num(row.max, m);
+        return m;
+      }
+      if (res.perLevel != null) return Math.max(0, Math.floor(num(res.perLevel) * lvl));
+      if (res.abilityMod) return Math.max(num(res.min, 1), abilMod(res.abilityMod));
+      if (res.fixed != null) return Math.max(0, num(res.fixed));
+      return 0;
+    };
+    // Normalize recharge into [{on, amount}]. A bare string ('long') means
+    // "resets to full on that rest"; an array is taken as-is (defaulting amount).
+    const normRecharge = (r) => {
+      if (typeof r === 'string') return [{ on: r, amount: 'full' }];
+      if (Array.isArray(r)) return r.filter((x) => x && x.on).map((x) => ({ on: String(x.on), amount: x.amount == null ? 'full' : x.amount }));
+      return [{ on: 'long', amount: 'full' }];
+    };
+    const ORD = ['1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th', '9th'];
+    const resources = [];
+
+    // 1. Class + subclass resource pools (both resolved at the class's level).
+    for (const c of classes) {
+      const subRec = c.subclass && api && api.getItem ? api.getItem('subclass', c.subclass) : null;
+      const pools = []
+        .concat(((c.record && c.record.classResources) || []).map((res) => [res, { type: 'class', id: c.classId, level: c.level }]))
+        .concat(((subRec && subRec.classResources) || []).map((res) => [res, { type: 'subclass', id: c.subclass, level: c.level }]));
+      for (const [res, source] of pools) {
+        if (!res || !res.key) continue;
+        if (num(res.minLevel, 1) > c.level) continue;
+        const max = resolveMax(res, c.level);
+        if (max <= 0) continue;
+        resources.push({
+          key: String(res.key), name: res.name || String(res.key), max, kind: 'pool',
+          recharge: normRecharge(res.recharge), source,
+        });
+      }
+    }
+    // 2. Hit Dice — aggregate by die size; regain half total level on a long rest.
+    const byDie = {};
+    for (const c of classes) { const d = c.record && c.record.hitDie; if (d) byDie[d] = (byDie[d] || 0) + c.level; }
+    for (const die of Object.keys(byDie)) {
+      resources.push({
+        key: 'hit-dice-' + die, name: 'Hit Dice (' + die + ')', max: byDie[die], kind: 'hitdice', die,
+        recharge: [{ on: 'long', amount: 'halfLevel' }], source: { type: 'class' },
+      });
+    }
+    // 3. Spell slots (leveled). Long rest → full.
+    const slots = (sheet.spellcasting && sheet.spellcasting.slots) || [];
+    slots.forEach((n, i) => {
+      if (num(n) > 0) resources.push({
+        key: 'slot-' + (i + 1), name: 'Spell Slots (' + (ORD[i] || (i + 1) + 'th') + ')', max: num(n), kind: 'slot',
+        recharge: [{ on: 'long', amount: 'full' }], source: { type: 'spellcasting' },
+      });
+    });
+    // 4. Granted free/limited casts (feat / species / subclass) → charges.
+    const parseFreq = (f) => { const m = /(\d+)\s*\/\s*(short|long)/i.exec(String(f || '')); return m ? { max: num(m[1], 1), on: m[2].toLowerCase() } : { max: 1, on: 'long' }; };
+    for (const g of (sheet.spellcasting && sheet.spellcasting.granted) || []) {
+      if (!g.free) continue;
+      const fq = parseFreq(g.free);
+      resources.push({
+        key: 'charge-' + (g.ref || g.name), name: (g.name || g.ref) + ' (free cast)', max: fq.max, kind: 'charge',
+        recharge: [{ on: fq.on, amount: 'full' }], source: g.source || { type: 'spell' },
+      });
+    }
+    sheet.resources = resources;
+  });
+
   return { sheet, warnings };
 }
